@@ -1,28 +1,41 @@
 #![allow(clippy::wildcard_imports)] // read::errors
 pub mod errors {
-    use error_chain::error_chain;
 
-    error_chain! {
-        foreign_links {
-            Io(::std::io::Error);
-            Utf8(::std::str::Utf8Error);
-            FromUtf8(::std::string::FromUtf8Error);
-            ParseFloat(::std::num::ParseFloatError);
-        }
 
-        errors {
-            InvalidType(x: u8)
-            RecursionLimitExceeded
-            DigitOutOfRange(x: u16)
-            UnnormalizedLong
-            IsNull
-            Unhashable(x: crate::Obj)
-            TypeError(x: crate::Obj)
-            InvalidRef
-        }
+    #[derive(thiserror::Error, Debug)]
+    pub enum Error {
+        #[error("Invalid type: {spec:X}")]
+        InvalidType {
+            spec: u8
+        },
+        #[error("Recursion limit exceeded")]
+        RecursionLimitExceeded,
+        #[error("Digit out of range: {digit}")]
+        DigitOutOfRange {
+            digit: u16
+        },
+        #[error("Unnormalized long")]
+        UnnormalizedLong,
+        #[error("Unexpected null")]
+        UnexpectedNull,
+        #[error("Unexpected use of unhashable type: {0:?}")]
+        Unhashable(crate::Obj),
+        #[error("Internal type error for {0:?}")]
+        TypeError(crate::Obj),
+        #[error("Invalid reference")]
+        InvalidRef,
+        #[error(transparent)]
+        Io(#[from] std::io::Error),
+        #[error(transparent)]
+        Utf8(#[from] std::str::Utf8Error),
+        #[error(transparent)] // TODO: Is this redundant?
+        StringUtf8(#[from] ::std::string::FromUtf8Error),
+        #[error("Unable to parse float: {0}")]
+        ParseFloat(#[from] std::num::ParseFloatError)
 
-        skip_msg_variant
     }
+
+    pub type Result<T> = std::result::Result<T, Error>;
 }
 
 use self::errors::*;
@@ -93,12 +106,12 @@ fn r_pylong(p: &mut RFile<impl Read>) -> Result<BigInt> {
     for _ in 0..size {
         let d = r_short(p)?;
         if d > (1 << 15) {
-            return Err(ErrorKind::DigitOutOfRange(d).into());
+            return Err(Error::DigitOutOfRange { digit: d });
         }
         digits.push(d);
     }
     if digits[(size - 1) as usize] == 0 {
-        return Err(ErrorKind::UnnormalizedLong.into());
+        return Err(Error::UnnormalizedLong.into());
     }
     Ok(BigInt::from_biguint(
         utils::sign_of(&n),
@@ -123,7 +136,7 @@ fn r_hashmap(p: &mut RFile<impl Read>) -> Result<HashMap<ObjHashable, Obj>> {
                 None => break,
                 Some(value) => {
                     map.insert(
-                        ObjHashable::try_from(&key).map_err(ErrorKind::Unhashable)?,
+                        ObjHashable::try_from(&key).map_err(Error::Unhashable)?,
                         value,
                     );
                 } // TODO
@@ -145,7 +158,8 @@ fn r_hashset_into(
 ) -> Result<()> {
     for _ in 0..n {
         set.insert(
-            ObjHashable::try_from(&r_object_not_null(p)?).map_err(ErrorKind::Unhashable)?,
+            ObjHashable::try_from(&r_object_not_null(p)?)
+                .map_err(Error::Unhashable)?,
         );
     }
     Ok(())
@@ -157,12 +171,12 @@ fn r_object(p: &mut RFile<impl Read>) -> Result<Option<Obj>> {
     let _depth_handle = p
         .depth
         .try_clone()
-        .map_or(Err(ErrorKind::RecursionLimitExceeded), Ok)?;
+        .map_or(Err(Error::RecursionLimitExceeded), Ok)?;
     let (flag, type_) = {
         let flag: bool = (code & Type::FLAG_REF) != 0;
         let type_u8: u8 = code & !Type::FLAG_REF;
         let type_: Type =
-            Type::from_u8(type_u8).map_or(Err(ErrorKind::InvalidType(type_u8)), Ok)?;
+            Type::from_u8(type_u8).map_or(Err(Error::InvalidType { spec: type_u8 }), Ok)?;
         (flag, type_)
     };
     let mut idx: Option<usize> = match type_ {
@@ -243,14 +257,14 @@ fn r_object(p: &mut RFile<impl Read>) -> Result<Option<Obj>> {
 
         Type::Ref => {
             let n = r_long(p)? as usize;
-            let result = p.refs.get(n).ok_or(ErrorKind::InvalidRef)?.clone();
+            let result = p.refs.get(n).ok_or(Error::InvalidRef)?.clone();
             if result.is_none() {
-                return Err(ErrorKind::InvalidRef.into());
+                return Err(Error::InvalidRef.into());
             } else {
                 Some(result)
             }
         }
-        Type::Unknown => return Err(ErrorKind::InvalidType(Type::Unknown as u8).into()),
+        Type::Unknown => return Err(Error::InvalidType { spec: Type::Unknown as u8 }.into()),
     };
     match (&retval, idx) {
         (None, _)
@@ -270,22 +284,22 @@ fn r_object(p: &mut RFile<impl Read>) -> Result<Option<Obj>> {
 }
 
 fn r_object_not_null(p: &mut RFile<impl Read>) -> Result<Obj> {
-    Ok(r_object(p)?.ok_or(ErrorKind::IsNull)?)
+    Ok(r_object(p)?.ok_or(Error::UnexpectedNull)?)
 }
 fn r_object_extract_string(p: &mut RFile<impl Read>) -> Result<Arc<String>> {
-    Ok(r_object_not_null(p)?
+    r_object_not_null(p)?
         .extract_string()
-        .map_err(ErrorKind::TypeError)?)
+        .map_err(Error::TypeError)
 }
 fn r_object_extract_bytes(p: &mut RFile<impl Read>) -> Result<Arc<Vec<u8>>> {
     Ok(r_object_not_null(p)?
         .extract_bytes()
-        .map_err(ErrorKind::TypeError)?)
+        .map_err(Error::TypeError)?)
 }
 fn r_object_extract_tuple(p: &mut RFile<impl Read>) -> Result<Arc<Vec<Obj>>> {
     Ok(r_object_not_null(p)?
         .extract_tuple()
-        .map_err(ErrorKind::TypeError)?)
+        .map_err(Error::TypeError)?)
 }
 fn r_object_extract_tuple_string(p: &mut RFile<impl Read>) -> Result<Vec<Arc<String>>> {
     Ok(r_object_extract_tuple(p)?
@@ -293,7 +307,7 @@ fn r_object_extract_tuple_string(p: &mut RFile<impl Read>) -> Result<Vec<Arc<Str
         .map(|x| {
             x.clone()
                 .extract_string()
-                .map_err(|o: Obj| Error::from(ErrorKind::TypeError(o)))
+                .map_err(Error::TypeError)
         })
         .collect::<Result<Vec<Arc<String>>>>()?)
 }
@@ -707,20 +721,20 @@ mod test {
     #[test]
     fn test_patch_873224() {
         assert_match!(
-            marshal_loads(b"0").unwrap_err().kind(),
-            errors::ErrorKind::IsNull
+            marshal_loads(b"0").unwrap_err(),
+            errors::Error::UnexpectedNull
         );
         let f_err = marshal_loads(b"f").unwrap_err();
-        match f_err.kind() {
-            errors::ErrorKind::Io(io_err) => {
+        match f_err {
+            errors::Error::Io(io_err) => {
                 assert_eq!(io_err.kind(), io::ErrorKind::UnexpectedEof);
             }
             _ => panic!(),
         }
         let int_err =
             marshal_loads(b"l\x05\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00 ").unwrap_err();
-        match int_err.kind() {
-            errors::ErrorKind::Io(io_err) => {
+        match int_err {
+            errors::Error::Io(io_err) => {
                 assert_eq!(io_err.kind(), io::ErrorKind::UnexpectedEof);
             }
             _ => panic!(),
@@ -746,35 +760,30 @@ mod test {
 
         assert_match!(
             marshal_loads(&[&b")\x01".repeat(1048576)[..], b"N"].concat())
-                .unwrap_err()
-                .kind(),
-            errors::ErrorKind::RecursionLimitExceeded
+                .unwrap_err(),
+            errors::Error::RecursionLimitExceeded
         );
         assert_match!(
             marshal_loads(&[&b"(\x01\x00\x00\x00".repeat(1048576)[..], b"N"].concat())
-                .unwrap_err()
-                .kind(),
-            errors::ErrorKind::RecursionLimitExceeded
+                .unwrap_err(),
+            errors::Error::RecursionLimitExceeded
         );
         assert_match!(
             marshal_loads(&[&b"[\x01\x00\x00\x00".repeat(1048576)[..], b"N"].concat())
-                .unwrap_err()
-                .kind(),
-            errors::ErrorKind::RecursionLimitExceeded
+                .unwrap_err(),
+            errors::Error::RecursionLimitExceeded
         );
         assert_match!(
             marshal_loads(
                 &[&b"{N".repeat(1048576)[..], b"N", &b"0".repeat(1048576)[..]].concat()
             )
-            .unwrap_err()
-            .kind(),
-            errors::ErrorKind::RecursionLimitExceeded
+            .unwrap_err(),
+            errors::Error::RecursionLimitExceeded
         );
         assert_match!(
             marshal_loads(&[&b">\x01\x00\x00\x00".repeat(1048576)[..], b"N"].concat())
-                .unwrap_err()
-                .kind(),
-            errors::ErrorKind::RecursionLimitExceeded
+                .unwrap_err(),
+            errors::Error::RecursionLimitExceeded
         );
     }
 
@@ -782,9 +791,8 @@ mod test {
     fn test_invalid_longs() {
         assert_match!(
             marshal_loads(b"l\x02\x00\x00\x00\x00\x00\x00\x00")
-                .unwrap_err()
-                .kind(),
-            errors::ErrorKind::UnnormalizedLong
+                .unwrap_err(),
+            errors::Error::UnnormalizedLong
         );
     }
     
