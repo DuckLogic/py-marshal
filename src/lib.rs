@@ -349,7 +349,7 @@ fn python_code_repr(f: &mut fmt::Formatter, x: &Code) -> fmt::Result {
 }
 /// This is a f64 wrapper suitable for use as a key in a (Hash)Map, since NaNs compare equal to
 /// each other, so it can implement Eq and Hash. `HashF64(-0.0) == HashF64(0.0)`.
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
 pub struct HashF64(f64);
 impl PartialEq for HashF64 {
@@ -369,6 +369,18 @@ impl Hash for HashF64 {
         } else {
             state.write_u64(self.0.to_bits()); // This should be fine, since all the dupes should be accounted for.
         }
+    }
+}
+impl From<f64> for HashF64 {
+    #[inline]
+    fn from(val: f64) -> Self {
+        HashF64(val)
+    }
+}
+impl From<HashF64> for f64 {
+    #[inline]
+    fn from(val: HashF64) -> Self {
+        val.0
     }
 }
 
