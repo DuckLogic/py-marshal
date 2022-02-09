@@ -18,6 +18,7 @@ pub type ArcRwLock<T> = Arc<RwLock<T>>;
 
 #[derive(FromPrimitive, ToPrimitive, Debug, Copy, Clone)]
 #[repr(u8)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
 enum Type {
     Null               = b'0',
     None               = b'N',
@@ -79,6 +80,7 @@ impl fmt::Debug for Depth {
 }
 
 bitflags! {
+    #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
     pub struct CodeFlags: u32 {
         const OPTIMIZED                   = 0x1;
         const NEWLOCALS                   = 0x2;
@@ -106,6 +108,7 @@ bitflags! {
 
 #[rustfmt::skip]
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
 pub struct Code {
     pub argcount:        u32,
     pub posonlyargcount: u32,
@@ -127,6 +130,7 @@ pub struct Code {
 
 #[rustfmt::skip]
 #[derive(Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
 pub enum Obj {
     None,
     StopIteration,
@@ -346,6 +350,7 @@ fn python_code_repr(f: &mut fmt::Formatter, x: &Code) -> fmt::Result {
 /// This is a f64 wrapper suitable for use as a key in a (Hash)Map, since NaNs compare equal to
 /// each other, so it can implement Eq and Hash. `HashF64(-0.0) == HashF64(0.0)`.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
 pub struct HashF64(f64);
 impl PartialEq for HashF64 {
     fn eq(&self, other: &Self) -> bool {
@@ -368,6 +373,8 @@ impl Hash for HashF64 {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
+#[cfg_attr(feature = "serialize", serde(bound = "T: Eq + Hash + serde::Serialize"))]
 pub struct HashableHashSet<T>(HashSet<T>);
 impl<T> Hash for HashableHashSet<T>
 where
@@ -406,6 +413,7 @@ where
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
 pub enum ObjHashable {
     None,
     StopIteration,
