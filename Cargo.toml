@@ -22,3 +22,15 @@ serde = { version = "1", optional = true, features = ["derive"] }
 
 [features]
 serialize = ["serde", "serde/rc", "num-bigint/serde", "num-complex/serde"]
+
+[dev-dependencies]
+# used for the examples
+serde_json = {version = "1", features = ["preserve_order"] }
+base64 = "0.13"
+byteorder = "1"
+anyhow = "1"
+ordered-float = "2"
+
+[[example]]
+name = "bytecode"
+required-features = ["serialize"]
