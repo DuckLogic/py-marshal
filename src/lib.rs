@@ -388,6 +388,18 @@ impl From<HashF64> for f64 {
 #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
 #[cfg_attr(feature = "serialize", serde(bound = "T: Eq + Hash + serde::Serialize"))]
 pub struct HashableHashSet<T>(HashSet<T>);
+impl<T> AsRef<HashSet<T>> for HashableHashSet<T> {
+    #[inline]
+    fn as_ref(&self) -> &HashSet<T> {
+        &self.0
+    }
+}
+impl<T> AsMut<HashSet<T>> for HashableHashSet<T> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut HashSet<T> {
+        &mut self.0
+    }
+}
 impl<T> Hash for HashableHashSet<T>
 where
     T: Hash,
