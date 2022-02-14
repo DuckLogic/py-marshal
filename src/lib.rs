@@ -9,12 +9,10 @@ use std::{
     fmt,
     hash::{Hash, Hasher},
     iter::FromIterator,
-    sync::{Arc, RwLock},
+    cell::Cell
 };
 
-/// `Arc` = immutable
-/// `ArcRwLock` = mutable
-pub type ArcRwLock<T> = Arc<RwLock<T>>;
+pub type ObjArena = bumpalo::Bump;
 
 #[derive(FromPrimitive, ToPrimitive, Debug, Copy, Clone)]
 #[repr(u8)]
@@ -54,31 +52,31 @@ impl Type {
     const FLAG_REF: u8 = b'\x80';
 }
 
-struct Depth(Arc<()>);
-impl Depth {
+struct Depth<'a>(&'a Cell<usize>);
+impl<'a> Depth<'a> {
     const MAX: usize = 900;
 
     #[must_use]
-    pub fn new() -> Self {
-        Self(Arc::new(()))
+    pub fn new(arena: &'a ObjArena) -> Self {
+        Self(Cell::new())
     }
 
     pub fn try_clone(&self) -> Option<Self> {
-        if Arc::strong_count(&self.0) > Self::MAX {
+        if self.0.get() > Self::MAX {
             None
         } else {
-            Some(Self(self.0.clone()))
+            self.cell.set(self.cell.get() + 1);
+            Some(Self(self.cell))
         }
     }
 }
-impl fmt::Debug for Depth {
+impl<'a> fmt::Debug for Depth<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         f.debug_tuple("Depth")
-            .field(&Arc::strong_count(&self.0))
+            .field(&self.0.get())
             .finish()
     }
 }
-
 bitflags! {
     #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
     pub struct CodeFlags: u32 {
@@ -107,46 +105,46 @@ bitflags! {
 }
 
 #[rustfmt::skip]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
-pub struct Code {
+pub struct Code<'a> {
     pub argcount:        u32,
     pub posonlyargcount: u32,
     pub kwonlyargcount:  u32,
     pub nlocals:         u32,
     pub stacksize:       u32,
     pub flags:           CodeFlags,
-    pub code:            Arc<Vec<u8>>,
-    pub consts:          Arc<Vec<Obj>>,
-    pub names:           Vec<Arc<String>>,
-    pub varnames:        Vec<Arc<String>>,
-    pub freevars:        Vec<Arc<String>>,
-    pub cellvars:        Vec<Arc<String>>,
-    pub filename:        Arc<String>,
-    pub name:            Arc<String>,
+    pub code:            &'a [u8],
+    pub consts:          &'a Obj<'a>,
+    pub names:           &'a str,
+    pub varnames:        &'a str,
+    pub freevars:        &'a str,
+    pub cellvars:        &'a str,
+    pub filename:        &'a str,
+    pub name:            &'a str,
     pub firstlineno:     u32,
-    pub lnotab:          Arc<Vec<u8>>,
+    pub lnotab:          &'a [u8],
 }
 
 #[rustfmt::skip]
 #[derive(Clone)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
-pub enum Obj {
+pub enum Obj<'a> {
     None,
     StopIteration,
     Ellipsis,
     Bool     (bool),
-    Long     (Arc<BigInt>),
+    Long     (&'a BigInt),
     Float    (f64),
-    Complex  (Complex<f64>),
-    Bytes    (Arc<Vec<u8>>),
-    String   (Arc<String>),
-    Tuple    (Arc<Vec<Obj>>),
-    List     (ArcRwLock<Vec<Obj>>),
-    Dict     (ArcRwLock<HashMap<ObjHashable, Obj>>),
-    Set      (ArcRwLock<HashSet<ObjHashable>>),
-    FrozenSet(Arc<HashSet<ObjHashable>>),
-    Code     (Arc<Code>),
+    Complex  (&'a f64),
+    Bytes    (&'a [u8]),
+    String   (&'a str),
+    Tuple    (&'a [Obj<'a>]),
+    List     (&'a [Obj<'a>]),
+    Dict     (&'a [(Obj<'a>, Obj<'a>)]),
+    Set      (&'a [Obj<'a>]),
+    FrozenSet(&'a [Obj<'a>]),
+    Code     (&'a Code<'a>),
     // etc.
 }
 macro_rules! define_extract {
@@ -188,20 +186,20 @@ macro_rules! define_is {
         }
     }
 }
-impl Obj {
+impl<'a> Obj<'a> {
     define_extract! { extract_none          (None)          -> ()                                    }
     define_extract! { extract_stop_iteration(StopIteration) -> ()                                    }
     define_extract! { extract_bool          (Bool)          -> bool                                  }
-    define_extract! { extract_long          (Long)          -> Arc<BigInt>                           }
+    define_extract! { extract_long          (Long)          -> &'a BigInt                           }
     define_extract! { extract_float         (Float)         -> f64                                   }
-    define_extract! { extract_bytes         (Bytes)         -> Arc<Vec<u8>>                          }
-    define_extract! { extract_string        (String)        -> Arc<String>                           }
-    define_extract! { extract_tuple         (Tuple)         -> Arc<Vec<Self>>                        }
-    define_extract! { extract_list          (List)          -> ArcRwLock<Vec<Self>>                  }
-    define_extract! { extract_dict          (Dict)          -> ArcRwLock<HashMap<ObjHashable, Self>> }
-    define_extract! { extract_set           (Set)           -> ArcRwLock<HashSet<ObjHashable>>       }
-    define_extract! { extract_frozenset     (FrozenSet)     -> Arc<HashSet<ObjHashable>>             }
-    define_extract! { extract_code          (Code)          -> Arc<Code>                             }
+    define_extract! { extract_bytes         (Bytes)         -> &'a [u8]                          }
+    define_extract! { extract_string        (String)        -> &'a String                           }
+    define_extract! { extract_tuple         (Tuple)         -> &'a [Self]                        }
+    define_extract! { extract_list          (List)          -> &'a [Self]                  }
+    define_extract! { extract_dict          (Dict)          -> &'a [(Obj<'a>, Self)] }
+    define_extract! { extract_set           (Set)           -> &'a [Obj<'a>]       }
+    define_extract! { extract_frozenset     (FrozenSet)     -> &'a [Obj<'a>]             }
+    define_extract! { extract_code          (Code)          -> &'a Code<'a>                             }
 
     define_is! { is_none          (None)          }
     define_is! { is_stop_iteration(StopIteration) }
@@ -230,7 +228,7 @@ impl Obj {
 /// # Code
 /// - Uses named arguments for readability
 /// - lnotab is formatted as bytes(...) with a list of integers, instead of a bytes literal
-impl fmt::Debug for Obj {
+impl fmt::Debug for Obj<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::None => write!(f, "None"),
@@ -325,7 +323,7 @@ fn python_string_repr(f: &mut fmt::Formatter, x: &str) -> fmt::Result {
     f.write_str(&original[last_end..])?;
     Ok(())
 }
-fn python_tuple_repr(f: &mut fmt::Formatter, x: &[Obj]) -> fmt::Result {
+fn python_tuple_repr<'a>(f: &mut fmt::Formatter, x: &[Obj<'a>]) -> fmt::Result {
     if x.is_empty() {
         f.write_str("()") // Otherwise this would get formatted into an empty string
     } else {
@@ -336,7 +334,7 @@ fn python_tuple_repr(f: &mut fmt::Formatter, x: &[Obj]) -> fmt::Result {
         debug_tuple.finish()
     }
 }
-fn python_frozenset_repr(f: &mut fmt::Formatter, x: &HashSet<ObjHashable>) -> fmt::Result {
+fn python_frozenset_repr<'a>(f: &mut fmt::Formatter, x: &[Obj<'a>]) -> fmt::Result {
     f.write_str("frozenset(")?;
     if !x.is_empty() {
         f.debug_set().entries(x.iter()).finish()?;
@@ -347,162 +345,8 @@ fn python_frozenset_repr(f: &mut fmt::Formatter, x: &HashSet<ObjHashable>) -> fm
 fn python_code_repr(f: &mut fmt::Formatter, x: &Code) -> fmt::Result {
     write!(f, "code(argcount={:?}, posonlyargcount={:?}, kwonlyargcount={:?}, nlocals={:?}, stacksize={:?}, flags={:?}, code={:?}, consts={:?}, names={:?}, varnames={:?}, freevars={:?}, cellvars={:?}, filename={:?}, name={:?}, firstlineno={:?}, lnotab=bytes({:?}))", x.argcount, x.posonlyargcount, x.kwonlyargcount, x.nlocals, x.stacksize, x.flags, Obj::Bytes(Arc::clone(&x.code)), x.consts, x.names, x.varnames, x.freevars, x.cellvars, x.filename, x.name, x.firstlineno, &x.lnotab)
 }
-/// This is a f64 wrapper suitable for use as a key in a (Hash)Map, since NaNs compare equal to
-/// each other, so it can implement Eq and Hash. `HashF64(-0.0) == HashF64(0.0)`.
-#[derive(Copy, Clone, Debug)]
-#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
-pub struct HashF64(f64);
-impl PartialEq for HashF64 {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0 || (self.0.is_nan() && other.0.is_nan())
-    }
-}
-impl Eq for HashF64 {}
-impl Hash for HashF64 {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        if self.0.is_nan() {
-            // Multiple NaN values exist
-            state.write_u8(0);
-        } else if self.0 == 0.0 {
-            // 0.0 == -0.0
-            state.write_u8(1);
-        } else {
-            state.write_u64(self.0.to_bits()); // This should be fine, since all the dupes should be accounted for.
-        }
-    }
-}
-impl From<f64> for HashF64 {
-    #[inline]
-    fn from(val: f64) -> Self {
-        HashF64(val)
-    }
-}
-impl From<HashF64> for f64 {
-    #[inline]
-    fn from(val: HashF64) -> Self {
-        val.0
-    }
-}
 
-#[derive(Debug)]
-#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
-#[cfg_attr(feature = "serialize", serde(bound = "T: Eq + Hash + serde::Serialize"))]
-pub struct HashableHashSet<T>(HashSet<T>);
-impl<T> AsRef<HashSet<T>> for HashableHashSet<T> {
-    #[inline]
-    fn as_ref(&self) -> &HashSet<T> {
-        &self.0
-    }
-}
-impl<T> AsMut<HashSet<T>> for HashableHashSet<T> {
-    #[inline]
-    fn as_mut(&mut self) -> &mut HashSet<T> {
-        &mut self.0
-    }
-}
-impl<T> Hash for HashableHashSet<T>
-where
-    T: Hash,
-{
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        let mut xor: u64 = 0;
-        let hasher = std::collections::hash_map::DefaultHasher::new();
-        for value in &self.0 {
-            let mut hasher_clone = hasher.clone();
-            value.hash(&mut hasher_clone);
-            xor ^= hasher_clone.finish();
-        }
-        state.write_u64(xor);
-    }
-}
-impl<T> PartialEq for HashableHashSet<T>
-where
-    T: Eq + Hash,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl<T> Eq for HashableHashSet<T> where T: Eq + Hash {}
-impl<T> FromIterator<T> for HashableHashSet<T>
-where
-    T: Eq + Hash,
-{
-    fn from_iter<I>(iter: I) -> Self
-    where
-        I: IntoIterator<Item = T>,
-    {
-        Self(iter.into_iter().collect())
-    }
-}
-
-#[derive(PartialEq, Eq, Hash, Clone)]
-#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
-pub enum ObjHashable {
-    None,
-    StopIteration,
-    Ellipsis,
-    Bool(bool),
-    Long(Arc<BigInt>),
-    Float(HashF64),
-    Complex(Complex<HashF64>),
-    String(Arc<String>),
-    Tuple(Arc<Vec<ObjHashable>>),
-    FrozenSet(Arc<HashableHashSet<ObjHashable>>),
-    // etc.
-}
-impl TryFrom<&Obj> for ObjHashable {
-    type Error = Obj;
-
-    fn try_from(orig: &Obj) -> Result<Self, Obj> {
-        match orig {
-            Obj::None => Ok(Self::None),
-            Obj::StopIteration => Ok(Self::StopIteration),
-            Obj::Ellipsis => Ok(Self::Ellipsis),
-            Obj::Bool(x) => Ok(Self::Bool(*x)),
-            Obj::Long(x) => Ok(Self::Long(Arc::clone(x))),
-            Obj::Float(x) => Ok(Self::Float(HashF64(*x))),
-            Obj::Complex(Complex { re, im }) => Ok(Self::Complex(Complex {
-                re: HashF64(*re),
-                im: HashF64(*im),
-            })),
-            Obj::String(x) => Ok(Self::String(Arc::clone(x))),
-            Obj::Tuple(x) => Ok(Self::Tuple(Arc::new(
-                x.iter()
-                    .map(Self::try_from)
-                    .collect::<Result<Vec<Self>, Obj>>()?,
-            ))),
-            Obj::FrozenSet(x) => Ok(Self::FrozenSet(Arc::new(
-                x.iter().cloned().collect::<HashableHashSet<Self>>(),
-            ))),
-            x => Err(x.clone()),
-        }
-    }
-}
-impl fmt::Debug for ObjHashable {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::None => write!(f, "None"),
-            Self::StopIteration => write!(f, "StopIteration"),
-            Self::Ellipsis => write!(f, "Ellipsis"),
-            Self::Bool(true) => write!(f, "True"),
-            Self::Bool(false) => write!(f, "False"),
-            Self::Long(x) => write!(f, "{}", x),
-            Self::Float(x) => python_float_repr_full(f, x.0),
-            Self::Complex(x) => python_complex_repr(
-                f,
-                Complex {
-                    re: x.re.0,
-                    im: x.im.0,
-                },
-            ),
-            Self::String(x) => python_string_repr(f, x),
-            Self::Tuple(x) => python_tuple_hashable_repr(f, x),
-            Self::FrozenSet(x) => python_frozenset_repr(f, &x.0),
-        }
-    }
-}
-fn python_tuple_hashable_repr(f: &mut fmt::Formatter, x: &[ObjHashable]) -> fmt::Result {
+fn python_tuple_hashable_repr<'a>(f: &mut fmt::Formatter, x: &[Obj<'a>]) -> fmt::Result {
     if x.is_empty() {
         f.write_str("()") // Otherwise this would get formatted into an empty string
     } else {

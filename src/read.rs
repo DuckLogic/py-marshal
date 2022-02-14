@@ -3,7 +3,7 @@ pub mod errors {
 
 
     #[derive(thiserror::Error, Debug)]
-    pub enum Error {
+    pub enum Error<'a> {
         #[error("Invalid type: {spec:X}")]
         InvalidType {
             spec: u8
@@ -19,9 +19,9 @@ pub mod errors {
         #[error("Unexpected null")]
         UnexpectedNull,
         #[error("Unexpected use of unhashable type: {0:?}")]
-        Unhashable(crate::Obj),
+        Unhashable(crate::Obj<'a>),
         #[error("Internal type error for {0:?}")]
-        TypeError(crate::Obj),
+        TypeError(crate::Obj<'a>),
         #[error("Invalid reference")]
         InvalidRef,
         #[error(transparent)]
@@ -35,7 +35,7 @@ pub mod errors {
 
     }
 
-    pub type Result<T> = std::result::Result<T, Error>;
+    pub type Result<'a, T> = std::result::Result<T, Error<'a>>;
 }
 
 use self::errors::*;
@@ -48,19 +48,19 @@ use std::{
     convert::TryFrom,
     io::Read,
     str::FromStr,
-    sync::{Arc, RwLock},
 };
 
-struct RFile<R: Read> {
-    depth: Depth,
+struct RFile<'a, R: Read> {
+    arena: &'a super::ObjArena<'a>,
+    depth: Depth<'a>,
     readable: R,
-    refs: Vec<Obj>,
+    refs: Vec<Obj<'a>>,
     has_posonlyargcount: bool,
 }
 
 macro_rules! define_r {
     ($ident:ident -> $ty:ty; $n:literal) => {
-        fn $ident(p: &mut RFile<impl Read>) -> Result<$ty> {
+        fn $ident<'a>(p: &mut RFile<'a, impl Read>) -> Result<'a, $ty> {
             let mut buf: [u8; $n] = [0; $n];
             p.readable.read_exact(&mut buf)?;
             Ok(<$ty>::from_le_bytes(buf))
@@ -74,19 +74,18 @@ define_r! { r_long      -> u32; 4 }
 define_r! { r_long64    -> u64; 8 }
 define_r! { r_float_bin -> f64; 8 }
 
-fn r_bytes(n: usize, p: &mut RFile<impl Read>) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    buf.resize(n, 0);
+fn r_bytes<'a>(n: usize, p: &mut RFile<'a, impl Read>) -> Result<'a, &'a [u8]> {
+    let buf = p.arena.as_bumpalo().alloc_slice_fill_copy(n, 0);
     p.readable.read_exact(&mut buf)?;
-    Ok(buf)
+    Ok(&*buf)
 }
 
-fn r_string(n: usize, p: &mut RFile<impl Read>) -> Result<String> {
+fn r_string<'a>(n: usize, p: &mut RFile<'a, impl Read>) -> Result<'a, &'a str> {
     let buf = r_bytes(n, p)?;
-    Ok(String::from_utf8(buf)?)
+    Ok(std::str::from_utf8(buf)?)
 }
 
-fn r_float_str(p: &mut RFile<impl Read>) -> Result<f64> {
+fn r_float_str<'a>(p: &mut RFile<impl Read>) -> Result<'a, f64> {
     let n = r_byte(p)?;
     let s = r_string(n as usize, p)?;
     Ok(f64::from_str(&s)?)
@@ -94,11 +93,11 @@ fn r_float_str(p: &mut RFile<impl Read>) -> Result<f64> {
 
 // TODO: test
 /// May misbehave on 16-bit platforms.
-fn r_pylong(p: &mut RFile<impl Read>) -> Result<BigInt> {
+fn r_pylong<'a>(p: &mut RFile<'a, impl Read>) -> Result<'a, &'a BigInt> {
     #[allow(clippy::cast_possible_wrap)]
     let n = r_long(p)? as i32;
     if n == 0 {
-        return Ok(BigInt::zero());
+        return Ok(p.arena.alloc(BigInt::zero()));
     };
     #[allow(clippy::cast_sign_loss)]
     let size = n.wrapping_abs() as u32;
@@ -113,40 +112,37 @@ fn r_pylong(p: &mut RFile<impl Read>) -> Result<BigInt> {
     if digits[(size - 1) as usize] == 0 {
         return Err(Error::UnnormalizedLong.into());
     }
-    Ok(BigInt::from_biguint(
+    Ok(p.arena.alloc(BigInt::from_biguint(
         utils::sign_of(&n),
         utils::biguint_from_pylong_digits(&digits),
-    ))
+    )))
 }
 
-fn r_vec(n: usize, p: &mut RFile<impl Read>) -> Result<Vec<Obj>> {
+fn r_vec<'a>(n: usize, p: &mut RFile<'a, impl Read>) -> Result<'a, &'a [Obj<'a>]> {
     let mut vec = Vec::with_capacity(n);
     for _ in 0..n {
         vec.push(r_object_not_null(p)?);
     }
-    Ok(vec)
+    Ok(p.arena.alloc(vec))
 }
 
-fn r_hashmap(p: &mut RFile<impl Read>) -> Result<HashMap<ObjHashable, Obj>> {
-    let mut map = HashMap::new();
+fn r_hashmap<'a>(p: &mut RFile<'a, impl Read>) -> Result<'a, &'a [(Obj<'a>, Obj<'a>)]> {
+    let mut map = Vec::new();
     loop {
         match r_object(p)? {
             None => break,
             Some(key) => match r_object(p)? {
-                None => break,
+                None => break, // TODO: Can we have key with no value??
                 Some(value) => {
-                    map.insert(
-                        ObjHashable::try_from(&key).map_err(Error::Unhashable)?,
-                        value,
-                    );
-                } // TODO
+                    map.push((key, value))
+                }
             },
         }
     }
     Ok(map)
 }
 
-fn r_hashset(n: usize, p: &mut RFile<impl Read>) -> Result<HashSet<ObjHashable>> {
+fn r_hashset(n: usize, p: &mut RFile<impl Read>) -> Result<[ObjHashable<'a>]> {
     let mut set = HashSet::new();
     r_hashset_into(&mut set, n, p)?;
     Ok(set)

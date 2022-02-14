@@ -12,6 +12,7 @@ keywords = ["python", "marshal", "read", "decode"]
 
 [dependencies]
 bitflags = "1"
+bumpalo = "3"
 num-traits = "0.2"
 num-derive = "0.3"
 num-bigint = "0.2"
